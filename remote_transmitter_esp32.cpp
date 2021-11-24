@@ -2,14 +2,17 @@
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 
-#ifdef ARDUINO_ARCH_ESP32
+#ifdef USE_ESP32
 
 namespace esphome {
 namespace remote_transmitter {
 
-static const char *TAG = "remote_transmitter";
+static const char *const TAG = "remote_transmitter";
 
-void RemoteTransmitterComponent::setup() {}
+void RemoteTransmitterComponent::setup() {
+  this->configure_rmt_();
+  this->set_idle_config();
+}
 
 void RemoteTransmitterComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Remote Transmitter...");
@@ -27,7 +30,7 @@ void RemoteTransmitterComponent::dump_config() {
   }
 }
 
-void RemoteTransmitterComponent::configure_rmt() {
+void RemoteTransmitterComponent::configure_rmt_() {
   rmt_config_t c{};
 
   this->config_rmt(c);
@@ -50,6 +53,7 @@ void RemoteTransmitterComponent::configure_rmt() {
   } else {
     c.tx_config.carrier_level = RMT_CARRIER_LEVEL_LOW;
     c.tx_config.idle_level = RMT_IDLE_LEVEL_HIGH;
+    this->inverted_ = true;
   }
 
   esp_err_t error = rmt_config(&c);
@@ -70,8 +74,30 @@ void RemoteTransmitterComponent::configure_rmt() {
   }
 }
 
-void RemoteTransmitterComponent::send_internal(uint32_t send_times, uint32_t send_wait) {
+void RemoteTransmitterComponent::set_idle_config() {
+  rmt_config_t c{};
+ 
+  this->config_rmt(c);
+  c.rmt_mode = RMT_MODE_TX;
+  c.gpio_num = gpio_num_t(this->pin_->get_pin());
+  c.tx_config.loop_en = false;
 
+  c.tx_config.carrier_en = false;
+  c.tx_config.idle_output_en = true;
+  // Force inverted logic in idle state
+  c.tx_config.carrier_level = RMT_CARRIER_LEVEL_LOW;
+  c.tx_config.idle_level = RMT_IDLE_LEVEL_HIGH;
+
+  // Update configuration
+  esp_err_t error = rmt_config(&c);
+  if (error != ESP_OK) {
+    this->error_code_ = error;
+    this->mark_failed();
+    return;
+  }
+}
+
+void RemoteTransmitterComponent::send_internal(uint32_t send_times, uint32_t send_wait) {
   rmt_config_t c{};
 
   if (this->is_failed())
@@ -79,10 +105,9 @@ void RemoteTransmitterComponent::send_internal(uint32_t send_times, uint32_t sen
 
   if (this->current_carrier_frequency_ != this->temp_.get_carrier_frequency()) {
     this->current_carrier_frequency_ = this->temp_.get_carrier_frequency();
-    this->configure_rmt();
   }
-  else // Restore correct configuration anyway 
-    this->configure_rmt();
+  // Restore correct configuration either way
+  this->configure_rmt_();
 
   this->rmt_temp_.clear();
   this->rmt_temp_.reserve((this->temp_.get_data().size() + 1) / 2);
@@ -93,17 +118,17 @@ void RemoteTransmitterComponent::send_internal(uint32_t send_times, uint32_t sen
     bool level = val >= 0;
     if (!level)
       val = -val;
-    val = this->from_microseconds(static_cast<uint32_t>(val));
+    val = this->from_microseconds_(static_cast<uint32_t>(val));
 
     do {
-      int32_t item = std::min(val, 32767);
+      int32_t item = std::min(val, int32_t(32767));
       val -= item;
 
       if (rmt_i % 2 == 0) {
-        rmt_item.level0 = static_cast<uint32_t>(level);
+        rmt_item.level0 = static_cast<uint32_t>(level ^ this->inverted_);
         rmt_item.duration0 = static_cast<uint32_t>(item);
       } else {
-        rmt_item.level1 = static_cast<uint32_t>(level);
+        rmt_item.level1 = static_cast<uint32_t>(level ^ this->inverted_);
         rmt_item.duration1 = static_cast<uint32_t>(item);
         this->rmt_temp_.push_back(rmt_item);
       }
@@ -132,24 +157,7 @@ void RemoteTransmitterComponent::send_internal(uint32_t send_times, uint32_t sen
   }
 
   // Start building idle configuration
-  this->config_rmt(c);
-  c.rmt_mode = RMT_MODE_TX;
-  c.gpio_num = gpio_num_t(this->pin_->get_pin());
-  c.tx_config.loop_en = false;
-
-  c.tx_config.carrier_en = false;
-  c.tx_config.idle_output_en = true;
-  // Force inverted logic in idle state
-  c.tx_config.carrier_level = RMT_CARRIER_LEVEL_LOW;
-  c.tx_config.idle_level = RMT_IDLE_LEVEL_HIGH;
-
-  // Update configuration
-  esp_err_t error = rmt_config(&c);
-  if (error != ESP_OK) {
-    this->error_code_ = error;
-    this->mark_failed();
-    return;
-  }
+  this->set_idle_config();
 }
 
 }  // namespace remote_transmitter
